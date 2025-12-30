@@ -41,11 +41,16 @@ cookie_manager = stx.CookieManager()
 def check_auth():
     try: allowed = st.secrets["general"]["allowed_emails"]
     except: allowed = []
+    
     if "user_email" in st.session_state: return True
+    
+    # Đợi cookie load
     time.sleep(0.1)
     saved = cookie_manager.get("user_email")
+    
     if saved and (not allowed or saved in allowed):
-        st.session_state["user_email"] = saved; return True
+        st.session_state["user_email"] = saved
+        return True
     return False
 
 if not check_auth():
@@ -54,42 +59,61 @@ if not check_auth():
     with c2:
         email = st.text_input("Email:", placeholder="admin@gmail.com")
         if st.button("Truy cập", use_container_width=True):
-            allowed = st.secrets["general"].get("allowed_emails", [])
-            if not allowed or email.strip() in allowed:
+            try:
+                allowed = st.secrets["general"]["allowed_emails"]
+                if not allowed or email.strip() in allowed:
+                    st.session_state["user_email"] = email.strip()
+                    cookie_manager.set("user_email", email.strip(), key="ck_mail")
+                    st.rerun()
+                else:
+                    st.error("Không có quyền.")
+            except:
+                # Chế độ mở nếu chưa cấu hình secrets
                 st.session_state["user_email"] = email.strip()
-                cookie_manager.set("user_email", email.strip(), key="ck_mail")
                 st.rerun()
-            else: st.error("Không có quyền.")
     st.stop()
 
 # ================= SIDEBAR (SIÊU GỌN) =================
 with st.sidebar:
     # Header: User + Logout (Dùng 2 cột để gọn)
     c_user, c_out = st.columns([4, 1])
-    c_user.caption(f"👤 {st.session_state['user_email']}")
+    c_user.caption(f"👤 {st.session_state.get('user_email', 'User')}")
     if c_out.button("🚪", help="Đăng xuất"):
-        cookie_manager.delete("user_email"); st.session_state.clear(); st.rerun()
+        cookie_manager.delete("user_email")
+        st.session_state.clear()
+        st.rerun()
     
     st.divider()
     
     # 1. API Key (Gộp Input và Button trên 1 dòng ảo)
     st.markdown("**🔑 API Key ImgBB**")
-    cur_key = cookie_manager.get("my_imgbb_key", "")
+    
+    # --- SỬA LỖI Ở ĐÂY: get() chỉ nhận 1 tham số ---
+    cur_key = cookie_manager.get("my_imgbb_key")
+    if cur_key is None: cur_key = ""
+    # -----------------------------------------------
+    
     api_key = st.text_input("Key", value=cur_key, type="password", label_visibility="collapsed", placeholder="Nhập API Key...")
     
     # Nút Lưu/Xóa nằm ngang
     b1, b2 = st.columns(2)
     if b1.button("💾 Lưu", use_container_width=True):
-        cookie_manager.set("my_imgbb_key", api_key, key="save_k"); st.toast("Đã lưu!")
+        if api_key:
+            cookie_manager.set("my_imgbb_key", api_key, key="save_k")
+            st.toast("Đã lưu!")
+            time.sleep(1)
     if b2.button("🗑️ Xóa", use_container_width=True):
-        cookie_manager.delete("my_imgbb_key"); st.rerun()
+        cookie_manager.delete("my_imgbb_key")
+        st.rerun()
 
     st.divider()
 
     # 2. Mapping ID
     st.markdown("**📂 File ID Mapping**")
     repo_path = os.path.join(os.getcwd(), "ID")
-    defaults = [f for f in os.listdir(repo_path) if f.endswith(".xlsx")] if os.path.exists(repo_path) else []
+    defaults = []
+    if os.path.exists(repo_path):
+        defaults = [f for f in os.listdir(repo_path) if f.endswith(".xlsx") and not f.startswith("~$")]
     
     # Radio nằm ngang
     map_mode = st.radio("Nguồn", ["Mặc định", "Upload"], horizontal=True, label_visibility="collapsed")
@@ -98,8 +122,9 @@ with st.sidebar:
     if map_mode == "Mặc định":
         if defaults:
             sel = st.selectbox("Chọn file", defaults, label_visibility="collapsed")
-            final_map = os.path.join(repo_path, sel)
-        else: st.warning("Không có file mặc định.")
+            if sel: final_map = os.path.join(repo_path, sel)
+        else:
+            st.warning("Không có file mặc định.")
     else:
         up = st.file_uploader("Excel", type=['xlsx'], label_visibility="collapsed")
         if up: final_map = up
@@ -116,11 +141,69 @@ if uploaded_files:
     if st.button(f"🚀 XỬ LÝ {len(uploaded_files)} FILE NGAY", type="primary", use_container_width=True):
         
         # Check config
-        run_key = api_key if api_key else st.secrets["general"].get("default_imgbb_key")
-        if not final_map: st.warning("⚠️ Chọn ID Mapping bên trái trước!"); st.stop()
+        run_key = api_key
+        if not run_key:
+            try: run_key = st.secrets["general"]["default_imgbb_key"]
+            except: pass
+            
+        if not final_map:
+            st.warning("⚠️ Vui lòng chọn File ID Mapping ở thanh bên trái trước!")
+            st.stop()
         
         # Process
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             i_dir, o_dir, m_dir = base/"in", base/"out", base/"map"
-            f
+            for d in [i_dir, o_dir, m_dir]: d.mkdir()
+            
+            # Save inputs
+            map_arg = None
+            if isinstance(final_map, str): # Là đường dẫn file có sẵn
+                shutil.copy(final_map, m_dir / os.path.basename(final_map))
+            else: # Là file upload
+                with open(m_dir / final_map.name, "wb") as f:
+                    f.write(final_map.getbuffer())
+            map_arg = str(m_dir)
+            
+            for uf in uploaded_files:
+                with open(i_dir / uf.name, "wb") as f:
+                    f.write(uf.getbuffer())
+            
+            # Run
+            status = st.status("Đang chạy...", expanded=True)
+            prog = status.progress(0)
+            
+            try:
+                # Hàm cập nhật tiến trình
+                def on_prog(c, t, m):
+                    percent = min(int((c / t) * 100), 99)
+                    prog.progress(percent)
+                    status.write(f"⚙️ {m}")
+
+                run_pipeline(str(i_dir), str(o_dir), run_key, on_prog, map_arg)
+                
+                status.update(label="✅ Xong!", state="complete", expanded=False)
+                
+                # Zip
+                z_path = base/"ket_qua.zip"
+                with zipfile.ZipFile(z_path, 'w', zipfile.ZIP_DEFLATED) as z:
+                    for r, _, fs in os.walk(o_dir):
+                        for f in fs:
+                            z.write(os.path.join(r, f), os.path.relpath(os.path.join(r, f), str(o_dir)))
+                
+                # Download
+                with open(z_path, "rb") as f:
+                    st.download_button(
+                        label="📥 TẢI KẾT QUẢ",
+                        data=f,
+                        file_name="ket_qua_moodle.zip",
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True
+                    )
+                    
+            except Exception as e:
+                status.update(label="❌ Lỗi", state="error")
+                st.error(f"Chi tiết lỗi: {str(e)}")
+else:
+    st.info("👈 Cài đặt ở thanh bên trái, sau đó upload file để bắt đầu.")
