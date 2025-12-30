@@ -1,0 +1,1 @@
+# Lớp cha hoặc interface dùng chung
